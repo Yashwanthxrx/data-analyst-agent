@@ -51,11 +51,8 @@ async def analyze_data(request: Request):
     processed_files = []
     files_info_response = {}
 
+    # Use a temporary directory to store all files, including extracted ones
     with tempfile.TemporaryDirectory() as temp_dir:
-        # Create a directory to hold the uploaded and extracted files for the subprocess
-        file_storage_path = os.path.join(temp_dir, "files")
-        os.makedirs(file_storage_path, exist_ok=True)
-
         for name, file_or_field in form.items():
             if not hasattr(file_or_field, 'filename'):
                 files_info_response[name] = file_or_field
@@ -78,13 +75,13 @@ async def analyze_data(request: Request):
                 try:
                     if is_zip:
                         with zipfile.ZipFile(archive_path) as zf:
-                            zf.extractall(file_storage_path)
+                            zf.extractall(temp_dir)
                     elif is_tar:
                         with tarfile.open(fileobj=archive_path) as tf:
-                            tf.extractall(file_storage_path)
+                            tf.extractall(temp_dir)
                     
-                    for extracted_filename in os.listdir(file_storage_path):
-                        extracted_filepath = os.path.join(file_storage_path, extracted_filename)
+                    for extracted_filename in os.listdir(temp_dir):
+                        extracted_filepath = os.path.join(temp_dir, extracted_filename)
                         with open(extracted_filepath, 'rb') as f:
                             extracted_content = f.read()
                         
@@ -106,7 +103,7 @@ async def analyze_data(request: Request):
                 is_image = file.content_type and file.content_type.startswith('image/')
                 
                 # Save the file to the temporary directory
-                file_path = os.path.join(file_storage_path, file.filename)
+                file_path = os.path.join(temp_dir, file.filename)
                 with open(file_path, 'wb') as f:
                     f.write(content)
 
@@ -126,12 +123,18 @@ async def analyze_data(request: Request):
 
             for p_file in processed_files:
                 if p_file.is_image:
-                    encoded_image = base64.b64encode(p_file.content).decode('utf-8')
-                    prompt_messages.append({"type": "text", "text": f"- An image file named `{p_file.name}`."})
-                    prompt_messages.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{p_file.content_type};base64,{encoded_image}"}
-                    })
+                    try:
+                        encoded_image = base64.b64encode(p_file.content).decode('utf-8')
+                        if encoded_image:
+                            prompt_messages.append({"type": "text", "text": f"- An image file named `{p_file.name}`."})
+                            prompt_messages.append({
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{p_file.content_type};base64,{encoded_image}"}
+                            })
+                        else:
+                            prompt_messages.append({"type": "text", "text": f"- An empty image file named `{p_file.name}`."})
+                    except Exception:
+                        prompt_messages.append({"type": "text", "text": f"- An image file named `{p_file.name}` which could not be processed due to a encoding error."})
                 elif p_file.is_text:
                     try:
                         decoded_content = p_file.content.decode('utf-8')
@@ -139,7 +142,6 @@ async def analyze_data(request: Request):
                         prompt_messages.append({"type": "text", "text": f"- A text file named `{p_file.name}`. Here is a preview of its content:\n---\n{preview}\n---"})
                     except UnicodeDecodeError:
                         prompt_messages.append({"type": "text", "text": f"- A file named `{p_file.name}` which appears to be binary."})
-
         
         generated_code = "# No valid question provided or an error occurred."
         if prompt_messages:
@@ -168,7 +170,7 @@ async def analyze_data(request: Request):
                 )
                 generated_code = response.choices[0].message.content
             except Exception as e:
-                generated_code = f"# An error occurred while contacting the OpenAI API: {e}"
+                return JSONResponse(status_code=500, content={"error": f"An error occurred while contacting the OpenAI API: {e}"})
 
         # New: Execute the generated code and capture the output
         if generated_code.startswith("#"):
@@ -183,7 +185,7 @@ async def analyze_data(request: Request):
             # Run the script in the directory where files are stored
             proc = subprocess.run(
                 [sys.executable, script_path],
-                cwd=file_storage_path, # Set the working directory
+                cwd=temp_dir, # Set the working directory to the temp dir
                 capture_output=True,
                 text=True,
                 check=True
